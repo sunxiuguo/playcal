@@ -1,6 +1,6 @@
 """playcal visual: a screenshot gate. Save a PNG as the baseline, then check later shots against it
 with a per-pixel tolerance, so antialiasing noise passes and a missing sprite fails. On a fail it
-writes a diff PNG with the changed pixels in red. Standard library only (8- and 16-bit PNGs, no interlace).
+writes a diff PNG with the changed pixels in red. Standard library only (8- and 16-bit PNGs, including Adam7 interlace).
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from .registry import Module
 
 SIG = b"\x89PNG\r\n\x1a\n"
 CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}  # grey, RGB, grey+alpha, RGBA
+ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+         (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))  # x, y, x step, y step
 DIM = bytes(v // 3 + 170 for v in range(256))  # unchanged pixels in the diff image: pale copy of the new shot
 
 
@@ -42,35 +44,49 @@ def read_png(path: Path) -> tuple[int, int, list[bytes]]:
     if not ihdr:
         raise PngError(f"{path}: no IHDR")
     w, h, depth, ctype, _, _, interlace = ihdr
-    if depth not in (8, 16) or ctype not in CHANNELS or interlace:
-        raise PngError(f"{path}: only 8- or 16-bit grey/RGB/RGBA PNGs without interlace (got depth {depth}, type {ctype})")
+    if depth not in (8, 16) or ctype not in CHANNELS or interlace not in (0, 1):
+        raise PngError(f"{path}: only 8- or 16-bit grey/RGB/RGBA PNGs (non-interlaced or Adam7) (got depth {depth}, type {ctype}, interlace {interlace})")
     bpp = CHANNELS[ctype] * (depth // 8)
     raw = zlib.decompress(b"".join(idat))
-    stride = w * bpp
-    rows, prev = [], bytearray(stride)
-    for y in range(h):
-        f = raw[y * (stride + 1)]
-        cur = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
-        if f == 1:
-            for i in range(bpp, stride):
-                cur[i] = (cur[i] + cur[i - bpp]) & 255
-        elif f == 2:
-            cur = bytearray((a + b) & 255 for a, b in zip(cur, prev))
-        elif f == 3:
-            for i in range(stride):
-                cur[i] = (cur[i] + ((cur[i - bpp] if i >= bpp else 0) + prev[i]) // 2) & 255
-        elif f == 4:
-            for i in range(stride):
-                a = cur[i - bpp] if i >= bpp else 0
-                b, c = prev[i], (prev[i - bpp] if i >= bpp else 0)
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                cur[i] = (cur[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
-        elif f != 0:
-            raise PngError(f"{path}: bad filter {f} on row {y}")
-        prev = cur
-        # 16-bit samples are compared at 8 bits: the high byte of each sample is kept.
-        rows.append(_rgba(bytes(cur[0::2] if depth == 16 else cur), ctype, w))
+    pixels = [bytearray(w * bpp) for _ in range(h)]
+    offset = 0
+    for x0, y0, dx, dy in ADAM7 if interlace else ((0, 0, 1, 1),):
+        pass_w, pass_h = len(range(x0, w, dx)), len(range(y0, h, dy))
+        if not pass_w or not pass_h:
+            continue  # Empty passes have no scanlines, not even a filter byte.
+        stride = pass_w * bpp
+        prev = bytearray(stride)
+        for y in range(y0, h, dy):
+            if offset + stride + 1 > len(raw):
+                raise PngError(f"{path}: truncated scanline on row {y}")
+            f = raw[offset]
+            cur = bytearray(raw[offset + 1:offset + 1 + stride])
+            offset += stride + 1
+            if f == 1:
+                for i in range(bpp, stride):
+                    cur[i] = (cur[i] + cur[i - bpp]) & 255
+            elif f == 2:
+                cur = bytearray((a + b) & 255 for a, b in zip(cur, prev))
+            elif f == 3:
+                for i in range(stride):
+                    cur[i] = (cur[i] + ((cur[i - bpp] if i >= bpp else 0) + prev[i]) // 2) & 255
+            elif f == 4:
+                for i in range(stride):
+                    a = cur[i - bpp] if i >= bpp else 0
+                    b, c = prev[i], (prev[i - bpp] if i >= bpp else 0)
+                    p = a + b - c
+                    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                    cur[i] = (cur[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+            elif f != 0:
+                raise PngError(f"{path}: bad filter {f} on row {y}")
+            prev = cur
+            if dx == 1:
+                pixels[y][:] = cur
+            else:
+                for channel in range(bpp):
+                    pixels[y][x0 * bpp + channel::dx * bpp] = cur[channel::bpp]
+    # Reassemble full-depth samples before keeping the high byte of each 16-bit sample.
+    rows = [_rgba(bytes(row[0::2] if depth == 16 else row), ctype, w) for row in pixels]
     return w, h, rows
 
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `visual` reads Adam7-interlaced PNGs, with the same 8- and 16-bit colour types as plain PNGs (#10).
 - `visual` reads 16-bit PNGs too (grey, RGB, RGBA); they are compared at 8 bits, the high byte of each sample (#1).
 - `logs` reads `adb logcat` dumps: the threadtime prefix is stripped and only the Unity tag is counted (#3).
 - `bench/live.py --scenario NAME` runs a single scenario (#2).
